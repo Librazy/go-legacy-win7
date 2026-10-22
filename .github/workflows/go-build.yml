@@ -95,7 +95,9 @@ jobs:
           # Compile outside GOROOT: go run inside the tree rebuilds the standard library.
           mkdir -p ../repack
           cp go-legacy-win7/.github/scripts/repack.go ../repack/repack.go
-          (cd ../repack && GO111MODULE=off go build -o repack .)
+          # GOOS and GOARCH above select the distpack archive. They must not
+          # cross-compile this host-side tool.
+          (cd ../repack && env -u GOOS -u GOARCH -u GOARM GO111MODULE=off go build -o repack .)
           ../repack/repack \
             -in "$src" \
             -out "go-legacy-win7-${{ inputs.version }}.${{ matrix.target }}.${ext}"
