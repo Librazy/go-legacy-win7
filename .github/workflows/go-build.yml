@@ -1,0 +1,127 @@
+name: Go Build Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Release version (e.g. 1.23.4-2)"
+        required: true
+        type: string
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+
+    strategy:
+      matrix:
+        target:
+          - windows_amd64
+          - windows_arm64
+          - windows_386
+          - darwin_amd64
+          - darwin_arm64
+          - linux_amd64
+          - linux_arm64
+          - linux_arm
+          - linux_386
+
+    steps:
+      - name: Resolve source branch
+        id: branch
+        run: |
+          VERSION="${{ inputs.version }}"
+          MAJOR_MINOR=$(echo "$VERSION" | grep -oP '^\d+\.\d+')
+
+          BRANCHES=$(git ls-remote --heads https://github.com/${{ github.repository }} | awk '{print $2}' | sed 's|refs/heads/||')
+
+          RELEASE_BRANCH="release-branch.go${MAJOR_MINOR}"
+
+          if echo "$BRANCHES" | grep -qx "$RELEASE_BRANCH"; then
+            echo "branch=$RELEASE_BRANCH" >> $GITHUB_OUTPUT
+            echo "Checking out $RELEASE_BRANCH for version $VERSION"
+          else
+            echo "branch=main" >> $GITHUB_OUTPUT
+            echo "No release branch found for $MAJOR_MINOR, falling back to main"
+          fi
+
+      - uses: actions/checkout@v7
+        with:
+          path: go-legacy-win7
+          ref: ${{ steps.branch.outputs.branch }}
+          fetch-depth: 0
+          token: ${{ secrets.RELEASE_TOKEN || github.token }}
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: "go-legacy-win7/src/go.mod"
+          cache: false
+
+      - name: Set execute permissions
+        run: |
+          chmod +x go-legacy-win7/src/make.bash
+
+      - name: Build Go toolchain
+        env:
+          GOOS: ${{ startsWith(matrix.target, 'windows_') && 'windows' || startsWith(matrix.target, 'darwin_') && 'darwin' || 'linux' }}
+          GOARCH: ${{ endsWith(matrix.target, '_386') && '386' || endsWith(matrix.target, '_amd64') && 'amd64' || endsWith(matrix.target, '_arm64') && 'arm64' || 'arm' }}
+          # An empty value is not "unset": cmd/dist records it as the toolchain default.
+          CGO_ENABLED: "0"
+          # cmd/dist already assumes 7 when cross-compiling. Set it so a future arm runner cannot change the archive.
+          GOARM: "7"
+          SOURCE_DATE_EPOCH: "0"
+        run: |
+          cd go-legacy-win7/src
+          ./make.bash --no-banner -distpack
+
+      - name: Package
+        env:
+          GOOS: ${{ startsWith(matrix.target, 'windows_') && 'windows' || startsWith(matrix.target, 'darwin_') && 'darwin' || 'linux' }}
+          GOARCH: ${{ endsWith(matrix.target, '_386') && '386' || endsWith(matrix.target, '_amd64') && 'amd64' || endsWith(matrix.target, '_arm64') && 'arm64' || 'arm' }}
+        run: |
+          if [[ "${{ matrix.target }}" == windows_* ]]; then
+            ext=zip
+          else
+            ext=tar.gz
+          fi
+          version=$(sed -n '1s/^go//p' go-legacy-win7/VERSION)
+          src="go-legacy-win7/pkg/distpack/go${version}.${GOOS}-${GOARCH}.${ext}"
+          test -f "$src"
+
+          # distpack names the top directory go/ and keeps patches/. Rewrite both
+          # without repacking from the filesystem, so the archive stays reproducible.
+          # Compile outside GOROOT: go run inside the tree rebuilds the standard library.
+          mkdir -p ../repack
+          cp go-legacy-win7/.github/scripts/repack.go ../repack/repack.go
+          (cd ../repack && GO111MODULE=off go build -o repack .)
+          ../repack/repack \
+            -in "$src" \
+            -out "go-legacy-win7-${{ inputs.version }}.${{ matrix.target }}.${ext}"
+
+      - name: Create Release
+        env:
+          GITHUB_TOKEN: ${{ secrets.RELEASE_TOKEN || github.token }}
+        run: |
+          cd go-legacy-win7
+
+          git config --global user.email "actions@github.com"
+          git config --global user.name "GitHub Actions"
+
+          git fetch --tags
+          if ! git rev-parse "v${{ inputs.version }}" >/dev/null 2>&1; then
+            git tag -a "v${{ inputs.version }}" -m "go-legacy-win7-${{ inputs.version }}"
+            git push origin "v${{ inputs.version }}"
+          fi
+
+          gh release view v${{ inputs.version }} || \
+          gh release create v${{ inputs.version }} \
+            --title "go-legacy-win7-${{ inputs.version }}" \
+            --notes "go-legacy-win7-${{ inputs.version }}" \
+            --draft \
+            --target ${{ steps.branch.outputs.branch }}
+
+          gh release upload v${{ inputs.version }} \
+            ../go-legacy-win7-${{ inputs.version }}.${{ matrix.target }}.* \
+            --clobber
