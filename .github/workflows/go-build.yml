@@ -67,59 +67,38 @@ jobs:
         env:
           GOOS: ${{ startsWith(matrix.target, 'windows_') && 'windows' || startsWith(matrix.target, 'darwin_') && 'darwin' || 'linux' }}
           GOARCH: ${{ endsWith(matrix.target, '_386') && '386' || endsWith(matrix.target, '_amd64') && 'amd64' || endsWith(matrix.target, '_arm64') && 'arm64' || 'arm' }}
-          CGO_ENABLED: ${{ matrix.target == 'linux_amd64' && '0' || '' }}
+          # An empty value is not "unset": cmd/dist records it as the toolchain default.
+          CGO_ENABLED: "0"
+          # cmd/dist already assumes 7 when cross-compiling. Set it so a future arm runner cannot change the archive.
+          GOARM: "7"
+          SOURCE_DATE_EPOCH: "0"
         run: |
           cd go-legacy-win7/src
-          ./make.bash --no-banner
-
-      - name: Create release directory
-        run: |
-          mkdir -p release
-          cp -r go-legacy-win7 release/
-          cd release/go-legacy-win7
-
-          # Remove development files
-          rm -rf .git*
-          rm -rf codereview.cfg
-          rm -rf patches
-          rm -rf test
-          rm -rf src/**/*_test.go
-          rm -rf src/**/testdata
-          rm -rf doc
-          rm -rf misc
-          rm -rf src/*.bash
-          rm -rf src/*.bat
-          rm -rf src/*.rc
-          rm -rf src/make.*
-          rm -rf src/run.*
-          rm -rf *.md
-
-          # Process binaries
-          cd bin
-          if [ "${{ matrix.target }}" != "linux_amd64" ]; then
-            rm -f go gofmt
-          fi
-          if [ -d "${{ matrix.target }}" ]; then
-            mv ${{ matrix.target }}/* ./
-          fi
-          rm -rf */
-
-          # Clean up pkg folder
-          cd ../pkg
-          find . -mindepth 1 -maxdepth 1 -type d ! \( -name "include" -o -name "tool" \) -exec rm -rf {} +
-
-          # Clean up pkg/tool folder
-          cd tool
-          find . -mindepth 1 -maxdepth 1 -type d ! -name "${{ matrix.target }}" -exec rm -rf {} +
+          ./make.bash --no-banner -distpack
 
       - name: Package
+        env:
+          GOOS: ${{ startsWith(matrix.target, 'windows_') && 'windows' || startsWith(matrix.target, 'darwin_') && 'darwin' || 'linux' }}
+          GOARCH: ${{ endsWith(matrix.target, '_386') && '386' || endsWith(matrix.target, '_amd64') && 'amd64' || endsWith(matrix.target, '_arm64') && 'arm64' || 'arm' }}
         run: |
-          cd release
           if [[ "${{ matrix.target }}" == windows_* ]]; then
-            zip -r ../go-legacy-win7-${{ inputs.version }}.${{ matrix.target }}.zip .
+            ext=zip
           else
-            tar -czf ../go-legacy-win7-${{ inputs.version }}.${{ matrix.target }}.tar.gz .
+            ext=tar.gz
           fi
+          version=$(sed -n '1s/^go//p' go-legacy-win7/VERSION)
+          src="go-legacy-win7/pkg/distpack/go${version}.${GOOS}-${GOARCH}.${ext}"
+          test -f "$src"
+
+          # distpack names the top directory go/ and keeps patches/. Rewrite both
+          # without repacking from the filesystem, so the archive stays reproducible.
+          # Compile outside GOROOT: go run inside the tree rebuilds the standard library.
+          mkdir -p ../repack
+          cp go-legacy-win7/.github/scripts/repack.go ../repack/repack.go
+          (cd ../repack && GO111MODULE=off go build -o repack .)
+          ../repack/repack \
+            -in "$src" \
+            -out "go-legacy-win7-${{ inputs.version }}.${{ matrix.target }}.${ext}"
 
       - name: Create Release
         env:
